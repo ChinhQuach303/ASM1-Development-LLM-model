@@ -12,15 +12,11 @@ def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
 
     Returns:
         torch.Tensor: Reshaped frequency tensor.
-
-    Raises:
-        AssertionError: If the frequency tensor doesn't match the expected shape.
-        AssertionError: If the target tensor 'x' doesn't have the expected number of dimensions.
     """
     ndim = x.ndim
-    assert 0 <= 1 < ndim
-    assert freqs_cis.shape == (x.shape[1], x.shape[-1])
-    shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
+    shape = [1] * ndim
+    shape[1] = x.shape[1]  # Match sequence length
+    shape[-1] = freqs_cis.shape[-1]  # Match frequency tensor's last dimension
     return freqs_cis.view(shape)
 
 def apply_rotary_emb(
@@ -33,43 +29,41 @@ def apply_rotary_emb(
     """
     Apply rotary embeddings to input tensors using the given frequency tensor.
 
-    This function applies rotary embeddings to the given query and key tensors. The rotation to each token
-    embedding is a function of that token's position in the sequence, head_dim, and theta.
-    The input tensors are reshaped as complex numbers to simplify your implementation.
-
     Args:
         query (torch.Tensor): Query tensor to apply rotary embeddings.
-                              Shape: (batch_size, seqlen, n_local_heads, self.head_dim)
+                              Shape: (batch_size, seqlen, n_local_heads, head_dim)
         key (torch.Tensor): Key tensor to apply rotary embeddings.
-                              Shape: (batch_size, seqlen, n_local_kv_heads, self.head_dim)
+                              Shape: (batch_size, seqlen, n_local_kv_heads, head_dim)
         head_dim (int): Dimension of each attention head.
         max_seq_len (int): Maximum sequence length supported by model.
     Returns:
         Tuple[torch.Tensor, torch.Tensor]: Tuple of modified query tensor and key tensor with rotary embeddings.
     """
-
     _, seqlen, _, _ = query.shape
     device = query.device
-    # todo
-    #
-    # Please refer to slide 22 in https://phontron.com/class/anlp2024/assets/slides/anlp-05-transformers.pdf
-    # and Section 3 in https://arxiv.org/abs/2104.09864.
 
-    # reshape xq and xk to match the complex representation
+    # Separate real and imaginary parts
     query_real, query_imag = query.float().reshape(query.shape[:-1] + (-1, 2)).unbind(-1)
     key_real, key_imag = key.float().reshape(key.shape[:-1] + (-1, 2)).unbind(-1)
-    # This separates each query/key vector into its odd and even indices (assuming *one-indexing*).
-    # query_real contains q_1, q_3, q_5, ... and query_imag contains q_2, q_4, q_6, ...
 
-    # First, compute the trigonometric values in the second and fourth columns in
-    # slide 22 (linked above).
+    # Generate sinusoidal frequencies
+    inv_freq = 1.0 / (theta ** (torch.arange(0, head_dim, 2, device=device).float() / head_dim))
+    t = torch.arange(seqlen, device=device).float()
+    freqs = torch.einsum("i,j->ij", t, inv_freq)
+    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # Convert to complex representation
 
-    # Then, combine these trigonometric values with the tensors query_real, query_imag,
-    # key_real, and key_imag.
+    # Reshape freqs_cis for broadcasting
+    freqs_cis = reshape_for_broadcast(freqs_cis, query)
 
-    raise NotImplementedError
+    # Apply rotary embeddings
+    query_complex = torch.view_as_complex(torch.stack((query_real, query_imag), dim=-1))
+    key_complex = torch.view_as_complex(torch.stack((key_real, key_imag), dim=-1))
 
-    query_out = None
-    key_out = None
-    # Return the rotary position embeddings for the query and key tensors
+    query_out = torch.view_as_real(query_complex * freqs_cis)
+    key_out = torch.view_as_real(key_complex * freqs_cis)
+
+    # Reshape back to original dimensions
+    query_out = query_out.flatten(-2)
+    key_out = key_out.flatten(-2)
+
     return query_out, key_out
